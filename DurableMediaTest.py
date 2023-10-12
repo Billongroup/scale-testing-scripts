@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # coding=utf-8
-# Billon 2023
+# Billon 2023-10-12
 
 # QUICK README
 """
@@ -43,6 +43,7 @@ try:
 except ImportError:
     from colony_scripts.colony.tests.DurableMediaTestConfig import Config
     from colony_scripts.colony.tests.soap import SoapAPI
+
 
 import argparse
 import os
@@ -188,12 +189,15 @@ class PublicationSlot:
         self.additional_details = ''
         self.documentMainCategory = 'ROOT'
         self.title = 'Random title'
+        self.receiver_url = publisher
+        self.retentionDate = Utils.getRandomRetention()
 
     def resetToReadyToPublish(self):
         self.updateCount -= 1
         if self.updateCount < 0 or self.blockchainAddress == None:
             self.blockchainAddress = None
             self.updateCount = self.updateConst
+            self.content = []
         self.status = 'READY_TO_PUBLISH'
         self.start = None
         self.jobId = None
@@ -445,25 +449,29 @@ class SinglePublisherState:
             result = myio.getvalue()
         else:
             result = str.encode("%PDF-1.1") + str.encode(suffix) + self.binaries[sizeKB]
-        return [result]
+        return result
 
     def getNextPdf(self, sufix=""):
         with mutex:
-            if self.gen is None:
-                self.gen = self.conf.pdf_getter(self.url)
             additional_details = 'Here be PUBLIC additional details'
             documentMainCategory = 'ROOT'
-            title = None
+            cif = None
+            receiver_url = self.url
+            title = 'RandomText_i' + sufix
+
             if not self.conf.use_predefined_pdfs:
                 content = self.getRandomContent(int(self.conf.sizeKB), sufix)
-                return content, additional_details, documentMainCategory, title
+                return [content], additional_details, documentMainCategory, [title], cif, receiver_url
+
+            if self.gen is None:
+                self.gen = self.conf.pdf_getter(self.url)
             try:
                 from pdfrw import PdfReader, PdfWriter
-                pdf_path, additional_details, documentMainCategory, title = next(self.gen)
+                pdf_path, additional_details, documentMainCategory, title, cif, receiver_url = next(self.gen)
             except Exception as err:
                 print(err)
                 raise err
-                return None, additional_details,  documentMainCategory, title
+                return None, additional_details,  documentMainCategory, title, cif, receiver_url
             result_pdfs = []
             for pdf in pdf_path:
                 trailer = PdfReader(pdf)
@@ -471,7 +479,7 @@ class SinglePublisherState:
                 PdfWriter(trailer=trailer).write(myio)
                 myio.seek(0)
                 result_pdfs.append(myio.getvalue())
-        return result_pdfs, additional_details, documentMainCategory, title
+        return result_pdfs, additional_details, documentMainCategory, title, cif, receiver_url
 
     def calculateQueue(self, minimum, maximum):
         max_active_now = self.mut.max_active
@@ -530,52 +538,55 @@ class SinglePublisherState:
                     start = self.conf.getTime()
                     index = self.mut.incGetIndex()
                     if not pub.content:
-                        pub.content, pub.additional_details, pub.documentMainCategory, pub.title = self.getNextPdf(str(index) + 'A' + str(threadNo) + 'time' + str(start) + '@' + self.url)
+                        pub.content, pub.additional_details, pub.documentMainCategory, pub.title, pub.cif, pub.receiver_url = self.getNextPdf(str(index) + 'A' + str(threadNo) + 'time' + str(start) + '@' + self.url)
                         if len(pub.content) > 1:
                             pub.updateCount = len(pub.content) - 1
-                    if pub.content is None:
-                        raise BaseException('Problem with pdf getter')
-                    pub.content.reverse()
+                            pub.content.reverse()
+                            pub.title.reverse()
+                    if pub.content is None or pub.title is None:
+                        raise BaseException(f'Problem with pdf getter {pub.content is None} or {pub.title is None}')
+                    if len(pub.content) != len(pub.title):
+                        raise BaseException('Problem with pdf getter, len(pub.content) != len(pub.title)')
                     creationDate = str(int(start) * 10**6)
                     hashContent = Utils.md5(pub.content[-1])
                     randomText = 'RandomText_i' + str(index) + 't' + str(threadNo) + '@' + self.url
-                    title = pub.title or randomText
+                    title = pub.title.pop() or randomText
+                    content = pub.content.pop()
                     try:
                         sendStartTime = self.conf.getTime()
-                        retentionDate = Utils.getRandomRetention()
                         if self.conf.private_for_publisher:
-                            pub.cif = next(self.cif)
+                            pub.cif = pub.cif or next(self.cif)
                             retPublish = self.getEndpoint().PublishPrivateDocument({
                                 'publisherCif': 'none',
                                 'publicationMode': 'NEW',
                                 'documentData': {
                                     'title': title,
-                                    'sourceDocument': pub.content.pop(),
+                                    'sourceDocument': content,
                                     'documentMainCategory': pub.documentMainCategory,
                                     'documentSystemCategory': 'ROOT',
                                     'BLOCKCHAINlegalValidityStartDate': creationDate,
-                                    'BLOCKCHAINexpirationDate': retentionDate,
-                                    'BLOCKCHAINretentionDate': retentionDate,
+                                    'BLOCKCHAINexpirationDate': pub.retentionDate,
+                                    'BLOCKCHAINretentionDate': pub.retentionDate,
                                     'extension': 'PDF',
                                     'additionalDetails': pub.additional_details,
                                     'privateAdditionalDetails': 'Here be PRIVATE additional details',
                                 },
-                                'authorizedUsersList' : pub.cif,
+                                'authorizedUsersList': pub.cif,
                                 'sendAuthorizationCodes': 'true',
                             })
                         elif self.private:
 
                             retPublish = self.getEndpoint().PublishPrivateDocument({
-                                'publisherCif': self.cif,
+                                'publisherCif': pub.cif or self.cif,
                                 'publicationMode': 'NEW',
                                 'documentData': {
                                     'title': title,
-                                    'sourceDocument': pub.content.pop(),
+                                    'sourceDocument': content,
                                     'documentMainCategory': pub.documentMainCategory,
                                     'documentSystemCategory': 'ROOT',
                                     'BLOCKCHAINlegalValidityStartDate': creationDate,
-                                    'BLOCKCHAINexpirationDate': retentionDate,
-                                    'BLOCKCHAINretentionDate': retentionDate,
+                                    'BLOCKCHAINexpirationDate': pub.retentionDate,
+                                    'BLOCKCHAINretentionDate': pub.retentionDate,
                                     'extension': 'PDF',
                                     'additionalDetails': pub.additional_details,
                                     'privateAdditionalDetails': 'Here be PRIVATE additional details',
@@ -591,12 +602,12 @@ class SinglePublisherState:
                                     'documentData': {
                                         'title': title,
                                         'previousDocumentBlockchainAddress': pub.blockchainAddress,
-                                        'sourceDocument': pub.content.pop(),
+                                        'sourceDocument': content,
                                         'documentMainCategory': pub.documentMainCategory,
                                         'documentSystemCategory': 'ROOT',
                                         'BLOCKCHAINlegalValidityStartDate': creationDate,
-                                        'BLOCKCHAINexpirationDate': retentionDate,
-                                        'BLOCKCHAINretentionDate': retentionDate,
+                                        'BLOCKCHAINexpirationDate': pub.retentionDate,
+                                        'BLOCKCHAINretentionDate': pub.retentionDate,
                                         'extension': 'PDF',
                                     }
                                 })
@@ -605,12 +616,12 @@ class SinglePublisherState:
                                     'publicationMode': 'NEW',
                                     'documentData': {
                                         'title': title,
-                                        'sourceDocument': pub.content.pop(),
+                                        'sourceDocument': content,
                                         'documentMainCategory': pub.documentMainCategory,
                                         'documentSystemCategory': 'ROOT',
                                         'BLOCKCHAINlegalValidityStartDate': creationDate,
-                                        'BLOCKCHAINexpirationDate': retentionDate,
-                                        'BLOCKCHAINretentionDate': retentionDate,
+                                        'BLOCKCHAINexpirationDate': pub.retentionDate,
+                                        'BLOCKCHAINretentionDate': pub.retentionDate,
                                         'extension': 'PDF',
                                         'additionalDetails': pub.additional_details,
                                     }
@@ -659,7 +670,11 @@ class SinglePublisherState:
                         return False
                     finally:
                         if pub.status == 'READY_TO_PUBLISH':
-                            self.handleReadySlot(pub, loop_stats)
+                            if pub.content:
+                                pub.setNotActive()
+                                self.mut.active -= 1
+                            else:
+                                self.handleReadySlot(pub, loop_stats)
                 elif pub.status == 'READY_TO_READ':
                     loop_stats.stats_checked_in_progress += 1
                     if pub.start is None:
@@ -862,7 +877,7 @@ class SinglePublisherState:
         startTime = self.conf.getTime()
         minimum = self.conf.min_queue_size
         maximum = self.conf.max_queue_size
-        self.cif = 'no_cif'
+        self.cif = None
         if self.private:
             logger.info('I will publish only private docs!')
             ext_docs_pub_mngr = ExtendedDocsPublishingManager()
@@ -883,7 +898,6 @@ class SinglePublisherState:
         publicationsInProgress = []
 
         reserved_num = self.reserveDocumentsToPublish(self.mut.max_active)
-
         for _ in range(reserved_num):
             if self.conf.read_only:
                 publicationsInProgress.append(PublicationSlot(publisher=self.url, status='READY_TO_READ'))
@@ -907,6 +921,7 @@ class SinglePublisherState:
 
         while self.mut.active > 0 and not global_state.exit.is_set():
             publicationsInProgress = list(filter(lambda x: x.status != 'NOT_ACTIVE', publicationsInProgress))
+
             cycleStart = self.conf.getTime()
             if self.mut.localPublishedOk + self.mut.localPublishedFail >= 100:
                 logger.debug("Published documents:" + str(self.result.publishedOk) + "." + " Active: " + str(self.mut.active) +
@@ -1023,7 +1038,7 @@ class DocsPublishingManager:
         for ip, ports in self.conf.pubs.items():
             for port in ports:
                 soap_address = 'http://' + ip + ':' + str(port)
-                self.publishers[soap_address] = self.conf.documents_to_publish
+                self.publishers[soap_address] = self.conf.documents_to_publish_for_pub.get(ip + ':' + str(port), self.conf.documents_to_publish)
         self.MAX_WORKERS = len(self.publishers)
 
         self.testDateStart = 0
@@ -1171,6 +1186,8 @@ class DocsPublishingManager:
         return True
 
     def doCategories(self, url):
+        if url not in self.conf.pubs_categories.keys():
+            self.conf.pubs_categories[url] = set()
         pubPort = url.split(":")[-1]
         pubIp = url.split(":")[1].strip('/')
         pubEndpoint = SoapAPI.PublisherEndpoint(pubIp, pubPort)
@@ -1183,7 +1200,10 @@ class DocsPublishingManager:
             logger.error('Wrong get answer for ' + str(url))
             return False
         categoriesInit = initCategoriesAnswer.categories
-        if 'ROOT' in [cat.name for cat in categoriesInit]:
+
+        if set(self.conf.pubs_categories[url]).issubset(set([cat.name for cat in categoriesInit])):
+            logger.info(f'Categories {self.conf.pubs_categories[url]} already added to publicator {url}')
+            print(f'Categories {self.conf.pubs_categories[url]} already added to {url}')
             return True
 
         categoriesInitLst = [{'name': cat.name, 'active': cat.active, 'parentPath': cat.parentPath} for cat in categoriesInit]
@@ -1271,6 +1291,7 @@ class DurableMediaTester:
         parser.add_argument('--publishers_limit', help='only select a few first publishers from config', type=int)
         parser.add_argument('--private', help='execute private docs publishing', action='store_true', default=False)
         parser.add_argument('--identities', action='store', type=str, help='Name of the file with identities list.')
+        parser.add_argument('--old_wsdl', action=argparse.BooleanOptionalAction)
         self.args = parser.parse_args(params)
         self.docs_pub_mngr = DocsPublishingManager(self.args)
         self.docs_pub_mngr.testDateStart = self.docs_pub_mngr.getTime()
