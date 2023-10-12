@@ -1,9 +1,11 @@
+# 2023-10-12
 import argparse
 import importlib
 import re
 import time
 import glob
 import yaml
+from collections import defaultdict
 from functools import partial
 
 
@@ -12,6 +14,7 @@ class Config:
         self.pubs = {}
         # Documents to publish per publisher
         self.documents_to_publish = 3
+        self.documents_to_publish_for_pub = {}
         self.sizeKB = 500
         # Max publications in progress per publisher
         self.max_queue_size = 20
@@ -124,10 +127,14 @@ class Config:
         for record in data_loaded:
             url = record['url']
             ip, port = url.split('/')[-1].split(':')
+            addr = ip + ':' + str(port)
             if ip not in self.pubs.keys():
                 self.pubs[ip] = []
             if port not in self.pubs[ip]:
                 self.pubs[ip].append(port)
+                self.documents_to_publish_for_pub[addr] = 1 # nie sa uwzglednione update, ale to dobrze
+            else:
+                self.documents_to_publish_for_pub[addr] += 1
             if url not in self.pubs_instruction:
                 self.pubs_instruction[url] = []
                 self.pubs_categories[url] = set()
@@ -137,15 +144,21 @@ class Config:
 
     def precise_pdf_getter(self, pub):
         for r in self.pubs_instruction[pub]:
-            yield r['source_documents'], r['additional_details'], r['category'], r['title']
+            yield r['source_documents'], r['additional_details'], r['category'], r['title'], r.get('blockchain_id', None), r.get('receiver_url', None)
+        while True:
+            yield None, None, None, None, None, None
 
     def default_pdf_getter(self, pub):
         additional_details = f'Here be PUBLIC additional details for {pub}'
         documentMainCategory = 'ROOT'
+        cif = None
+        receiver_url = None
         title = None
         print(glob.glob(f'{self.pdf_dir}/*pdf'))
         for pdf in glob.glob(f'{self.pdf_dir}/*pdf'):
-            yield [pdf], additional_details, documentMainCategory, title
+            yield [pdf], additional_details, documentMainCategory, [title], cif, receiver_url
+        while True:
+            yield [], additional_details, documentMainCategory, [title], cif, receiver_url
 
     def readConfFromArgparse(self, params):
 
@@ -214,8 +227,6 @@ class Config:
             self.pubs = eval(args.publishers)
         if args.rcv_publishers:
             self.rcv_publishers = eval(args.rcv_publishers)
-        if args.num_publications:
-            self.documents_to_publish = args.num_publications
         if args.identities:
             self.identitiesFilename = args.identities
         if args.use_predefined_pdfs:
